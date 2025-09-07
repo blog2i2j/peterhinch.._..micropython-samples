@@ -9,7 +9,7 @@ from machine import Pin
 import asyncio
 from .spi_master import SpiMaster
 
-pin_cs = Pin(20, Pin.OUT, value=1)
+pin_cs = Pin(17, Pin.OUT, value=1)
 pin_sck = Pin(18, Pin.OUT, value=0)
 pin_mosi = Pin(19, Pin.OUT, value=0)
 pin_miso = Pin(16, Pin.IN)
@@ -19,7 +19,6 @@ tsf = asyncio.ThreadSafeFlag()
 
 def callback():  # Hard ISR
     tsf.set()  # Flag user code that transfer is complete
-    print("cb")
 
 
 buf = bytearray(100)
@@ -37,9 +36,9 @@ async def main():
     src_data = bytearray(b"\xFF\x55\xAA\x00the quick brown fox jumps over the lazy dog")
     n = 0
     while True:
-        asyncio.create_task(send(src_data))  # Send as a background task
+        await send(src_data)
+        print(n, bytes(buf[: len(src_data)]))
         await asyncio.sleep(1)
-        print(n, buf[: len(src_data)])
         n += 1
         n &= 0xFF
         src_data[0] = n

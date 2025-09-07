@@ -23,7 +23,7 @@ def spi_in():
     wait(0, pins, 2)  # Wait for CS/ True
     wrap_target()  # Input a byte
     set(x, 7)
-    label("bit")
+    label("bit")  # Await a +ve clock edge or incoming "quit" signal
     jmp(pin, "next")
     jmp(not_osre, "done")  # Data received: quit
     jmp("bit")
@@ -31,6 +31,7 @@ def spi_in():
     in_(pins, 1)  # Input a bit MSB first
     wait(0, pins, 1)  # clk trailing
     jmp(y_dec, "continue")
+    # Last trailing clock edge received
     label("overrun")  # An overrun would occur. Wait for CS/ ISR to send data.
     jmp(not_osre, "done")  # Data received
     jmp("overrun")
@@ -44,27 +45,50 @@ def spi_in():
     jmp("escape")
 
 
+# in_base = MOSI
+# out_base = MISO
+# DMA feeds OSR via autopull
+
+
+@rp2.asm_pio(autopull=True, pull_thresh=8, out_init=rp2.PIO.OUT_LOW)
+def spi_out():
+    wait(0, pins, 2)  # Wait for CS/ True
+    wrap_target()
+    set(x, 7)
+    label("bit")  # Await a +ve clock edge
+    wait(1, pins, 1)
+    out(pins, 1)  # Stalls here if out of data: IRQ resets SM
+    wait(0, pins, 1)  # Await low clock edge
+    jmp(x_dec, "bit")
+    wrap()
+
+
 class SpiSlave:
-    def __init__(self, buf=None, callback=None, sm_num=0, *, mosi, sck, csn):
+    def __init__(self, buf=None, callback=None, sm_num=0, *, mosi, sck, csn, miso=None):
         # Get data request channel for a SM: RP2040 datasheet 2.5.3 RP2350 12.6.4.1
         def dreq(sm, rx=False):
             d = (sm & 3) + ((sm >> 2) << 3)
             return 4 + d if rx else d
 
+        self._io = miso is not None
+        self._csn = csn
+        self._wbuf = None  # Write buffer
+        self._reps = 0  # Write repeat
         self._callback = callback
         self._docb = False  # By default CB des not run
-        # Set up DMA
+        # Set up read DMA
         self._dma = rp2.DMA()
         # Transfer bytes, rather than words, don't increment the read address and pace the transfer.
         self._cfg = self._dma.pack_ctrl(size=0, inc_read=False, treq_sel=dreq(sm_num, True))
-        self._sm_num = sm_num
+        # Input (MOSI) SM
         self._buf = buf
         self._nbytes = 0  # Number of received bytes
         if buf is not None:
             self._mvb = memoryview(buf)
         self._tsf = asyncio.ThreadSafeFlag()
         self._read_done = False  # Synchronisation for .read()
-        csn.irq(self._done, trigger=Pin.IRQ_RISING, hard=True)  # IRQ occurs at end of transfer
+        # IRQ occurs at end of transfer HACK mem error if hard L184
+        csn.irq(self._done, trigger=Pin.IRQ_RISING, hard=True)
         self._sm = rp2.StateMachine(
             sm_num,
             spi_in,
@@ -73,6 +97,18 @@ class SpiSlave:
             in_base=mosi,
             jmp_pin=sck,
         )
+        if self._io:
+            # Output (MISO) SM
+            # Write DMA
+            self._wdma = rp2.DMA()
+            self._wcfg = self._wdma.pack_ctrl(size=0, inc_write=False, treq_sel=dreq(sm_num + 1))
+            self._osm = rp2.StateMachine(
+                sm_num + 1,
+                spi_out,
+                pull_thresh=8,
+                in_base=mosi,
+                out_base=miso,
+            )
 
     def __aiter__(self):  # Asynchronous iterator support
         return self
@@ -103,13 +139,35 @@ class SpiSlave:
         else:
             raise ValueError("Missing callback function.")
 
+    # Send a buffer on next transfer. reps==-1 is forever (until next write)
+    def write(self, buf, reps=1):
+        self._wbuf = buf[:]  # Copy in case caller modifies before it gets sent (queue?)
+        self._reps = reps
+
     def _rinto(self, buf):  # .read_into() without callback
         buflen = len(buf)
         self._buflen = buflen  # Save for ISR
         self._dma.active(0)  # De-activate befor re-configuring
         self._sm.active(0)
         self._tsf.clear()
-        self._dma.config(read=self._sm, write=buf, count=buflen, ctrl=self._cfg, trigger=False)
+        self._dma.config(read=self._sm, write=buf, count=buflen, ctrl=self._cfg)
+        if self._io:
+            self._wdma.active(0)
+            self._osm.active(0)
+            if self._reps:  # Repeat forever if _reps==-1
+                if self._reps > 0:
+                    self._reps -= 1
+                # TODO necessary? Can write buffer be bigger than read?
+                n = min(buflen, len(self._wbuf))
+                print("sending", n, self._wbuf[:n])
+                # print(self._dma, self._wdma)
+                self._wdma.config(
+                    read=self._wbuf, write=self._osm, count=n, ctrl=self._wcfg, trigger=True
+                )
+                self._wdma.active(1)
+                self._osm.restart()  # osm waits for CS/ low
+                self._osm.active(1)
+
         self._dma.active(1)
         self._sm.restart()
         self._sm.active(1)  # Start SM
@@ -118,17 +176,21 @@ class SpiSlave:
     # Hard ISR for CS/ rising edge.
     def _done(self, _):  # Get no. of bytes received.
         self._dma.active(0)
+        if self._io:
+            self._wdma.active(0)
         self._sm.put(0)  # Request no. of received bits
         if not self._sm.rx_fifo():  # Occurs if ._rinto() never called while CSN is low:
             # a transmission was missed.
-            # print("GH")
+            print("Missed TX?")
             return  # ISR runs on trailing edge but SM is not running. Nothing to do.
+        # TODO Next line occasionally memfails if IRQ is hard
         sp = self._sm.get() >> 3  # Bits->bytes: space left in buffer or 7ffffff on overflow
         self._nbytes = self._buflen - sp if sp != 0x7FFFFFF else self._buflen
         self._dma.active(0)
         self._sm.active(0)
         self._tsf.set()
         self._read_done = True
+        print("GH3")
         if self._docb:  # Only run CB if user has called .read_into()
             self._docb = False
             schedule(self._callback, self._nbytes)  # Soft ISR
@@ -141,4 +203,10 @@ class SpiSlave:
 
     def deinit(self):
         self._dma.active(0)
+        self._dma.close()
+        self._csn.irq(None)
+        if self._io:
+            self._wdma.active(0)
+            self._wdma.close()
+            self._osm.active(0)
         self._sm.active(0)

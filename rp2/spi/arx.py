@@ -8,9 +8,12 @@ from machine import Pin, reset
 from .spi_slave import SpiSlave
 from time import sleep_ms
 
-mosi = Pin(0, Pin.IN)
-sck = Pin(1, Pin.IN)
-csn = Pin(2, Pin.IN)
+# mosi = Pin(0, Pin.IN)
+# sck = Pin(1, Pin.IN)
+# csn = Pin(2, Pin.IN)
+mosi = Pin(12, Pin.IN)
+sck = Pin(13, Pin.IN)
+csn = Pin(14, Pin.IN)
 
 piospi = SpiSlave(buf=bytearray(300), sm_num=0, mosi=mosi, sck=sck, csn=csn)
 

@@ -68,23 +68,20 @@ class SpiMaster:
             f = 2 * freq  # 2 clock cycles per bit
             self._sm = rp2.StateMachine(sm_num, spi_out, freq=f, sideset_base=sck, out_base=mosi)
             self._sm.active(1)
-        else:
-            # I/O
-            f = 4 * freq  # 4 cycles per bit
-            self._sm = rp2.StateMachine(
-                sm_num,
-                spi_inout,
-                freq=f,
-                sideset_base=sck,
-                out_base=mosi,
-                in_base=miso,
-            )
-            self._idma = rp2.DMA()
-            dc = dreq(sm_num, True)  # Data in
-            self._ictrl = self._idma.pack_ctrl(
-                size=0, inc_read=False, irq_quiet=False, treq_sel=dc
-            )
-        # self._idma.irq(self._done)
+            return
+        # I/O
+        f = 4 * freq  # 4 cycles per bit
+        self._sm = rp2.StateMachine(
+            sm_num,
+            spi_inout,
+            freq=f,
+            sideset_base=sck,
+            out_base=mosi,
+            in_base=miso,
+        )
+        self._idma = rp2.DMA()
+        dc = dreq(sm_num, True)  # Data in
+        self._ictrl = self._idma.pack_ctrl(size=0, inc_read=False, irq_quiet=False, treq_sel=dc)
         self._sm.active(1)
 
     def _done(self, dma):  # I/O transfer complete
@@ -93,9 +90,7 @@ class SpiMaster:
         if self._io:
             self._idma.active(0)
         self._sm.active(0)
-        self._cb()
-        # callback = self._cb
-        # callback()
+        self._cb()  # User callback.
 
     def write(self, data):
         ld = len(data)

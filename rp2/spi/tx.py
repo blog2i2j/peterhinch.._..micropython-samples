@@ -12,7 +12,7 @@ pin_miso = Pin(16, Pin.IN)  # Not used: keep driver happy
 pin_sck = Pin(18, Pin.OUT, value=0)
 pin_mosi = Pin(19, Pin.OUT, value=0)
 
-spi = SPI(0, baudrate=10_000_000, sck=pin_sck, mosi=pin_mosi, miso=pin_miso)
+spi = SPI(0, baudrate=1_000_000, sck=pin_sck, mosi=pin_mosi, miso=pin_miso)
 
 
 def send(obuf):
