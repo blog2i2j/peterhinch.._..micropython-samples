@@ -4,7 +4,14 @@
 # Copyright (c) 2025 Peter Hinch
 
 # Performs SPI output: check on scope or LA.
-
+# TODO:
+# Fails if baudrate >= 9MHz
+# Problem with pin nos?
+# 11 Sept slave works bidirectionally with tx.py, but with this code slave receives
+# nothing, but responds with correct data. Waveforms look identical. MOSI data looks correct.
+# Slave gets correct data with unidirectional setup (no ibuf)
+# 45us after last clock edge, clk emits a 250ns pulse. CS/ goes high 724us after last clock
+# I think spurious clk is screwing RX SM.
 from machine import Pin
 import asyncio
 from .spi_master import SpiMaster
@@ -18,6 +25,7 @@ tsf = asyncio.ThreadSafeFlag()
 
 
 def callback():  # Hard ISR
+    pin_cs(1)  # Decrease deassert time from 724us to 93us but still fails
     tsf.set()  # Flag user code that transfer is complete
 
 
@@ -26,6 +34,7 @@ spi = SpiMaster(6, 1_000_000, pin_sck, pin_mosi, callback, miso=pin_miso, ibuf=b
 
 
 async def send(data):
+    tsf.clear()  # no effect
     pin_cs(0)  # Assert CS/
     spi.write(data)  # "Immediate" return: minimal blocking.
     await tsf.wait()  # Wait for transfer complete (other tasks run)

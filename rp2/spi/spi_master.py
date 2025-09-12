@@ -35,26 +35,26 @@ def spi_out():
     out_init=rp2.PIO.OUT_LOW,
 )
 def spi_inout():
+    mov(y, y).side(0x0)  # Set clk low on restart
     wrap_target()
-    set(x, 7).side(0x0)
+    set(x, 7)  # Leave clk in current state
     label("bitloop")
     out(pins, 1).side(0x0)  # Stalls with CLK low while FIFO is empty
-    mov(y, y).side(0x1)  # Set clock high
-    in_(pins, 1).side(0x1)
-    jmp(x_dec, "bitloop").side(0x0)
+    mov(y, y).side(0x0)
+    in_(pins, 1).side(0x1)  # Set clock high
+    jmp(x_dec, "bitloop").side(0x1)
     wrap()
-
-
-# Get data request channel for a SM: RP2040 datasheet 2.5.3 RP2350 12.6.4.1
-def dreq(sm, rx=False):
-    d = (sm & 3) + ((sm >> 2) << 3)
-    return 4 + d if rx else d
 
 
 # The callback runs when DMA is complete. This may be up to four byte times prior to
 # the SM running out of data (FIFO depth).
 class SpiMaster:
     def __init__(self, sm_num, freq, sck, mosi, callback, *, miso=None, ibuf=None):
+        # Get data request channel for a SM: RP2040 datasheet 2.5.3 RP2350 12.6.4.1
+        def dreq(sm, rx=False):
+            d = (sm & 3) + ((sm >> 2) << 3)
+            return 4 + d if rx else d
+
         self._sm_num = sm_num
         self._cb = callback
         self._dma = rp2.DMA()
@@ -98,7 +98,9 @@ class SpiMaster:
         self._dma.active(1)
         if self._io:
             cnt = min(ld, self._io)  # Prevent overrun of ibuf
-            self._idma.config(read=self._sm, write=self._ibuf, count=cnt, ctrl=self._ictrl)
+            self._idma.config(
+                read=self._sm, write=self._ibuf, count=cnt, ctrl=self._ictrl, trigger=True
+            )
             self._idma.active(1)
         self._sm.active(1)  # Start SM
 

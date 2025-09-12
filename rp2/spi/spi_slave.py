@@ -16,7 +16,7 @@ alloc_emergency_exception_buf(100)
 # 2 CS\
 
 
-@rp2.asm_pio(autopush=True, autopull=True)
+@rp2.asm_pio(autopull=True)
 def spi_in():
     label("escape")  # Just started, transfer ended or overrun attempt.
     out(y, 32)  # Get maximum byte count (blocking wait)
@@ -37,15 +37,18 @@ def spi_in():
     jmp("overrun")
     label("continue")
     jmp(x_dec, "bit")  # Post decrement
+    push()
     wrap()  # Next byte
     label("done")  # ISR has sent data
     out(x, 32)  # Discard it
     in_(y, 30)  # Return amount of unfilled buffer truncated to 30 bits
+    push()
+    # TODO Is this valid given that push_thresh==8?
     # Truncation ensures that overrun returns a short int
     jmp("escape")
 
 
-# in_base = MOSI
+# in_base = MOSI. Offsets CLK(1), CS/(2)
 # out_base = MISO
 # DMA feeds OSR via autopull
 
@@ -55,10 +58,10 @@ def spi_out():
     wait(0, pins, 2)  # Wait for CS/ True
     wrap_target()
     set(x, 7)
-    label("bit")  # Await a +ve clock edge
-    wait(1, pins, 1)
+    label("bit")
+    wait(0, pins, 1)  # Await clock low
     out(pins, 1)  # Stalls here if out of data: IRQ resets SM
-    wait(0, pins, 1)  # Await low clock edge
+    wait(1, pins, 1)  # Await high going clock edge
     jmp(x_dec, "bit")
     wrap()
 
@@ -72,8 +75,7 @@ class SpiSlave:
 
         self._io = miso is not None
         self._csn = csn
-        self._wbuf = None  # Write buffer
-        self._reps = 0  # Write repeat
+        self._wq = []  # Write queue
         self._callback = callback
         self._docb = False  # By default CB des not run
         # Set up read DMA
@@ -87,13 +89,13 @@ class SpiSlave:
             self._mvb = memoryview(buf)
         self._tsf = asyncio.ThreadSafeFlag()
         self._read_done = False  # Synchronisation for .read()
-        # IRQ occurs at end of transfer HACK mem error if hard L184
-        csn.irq(self._done, trigger=Pin.IRQ_RISING, hard=True)
+        # IRQ occurs at end of transfer
+        csn.irq(self._done, trigger=Pin.IRQ_RISING, hard=False)
         self._sm = rp2.StateMachine(
             sm_num,
             spi_in,
             in_shiftdir=rp2.PIO.SHIFT_LEFT,
-            push_thresh=8,
+            # push_thresh=8,
             in_base=mosi,
             jmp_pin=sck,
         )
@@ -139,10 +141,11 @@ class SpiSlave:
         else:
             raise ValueError("Missing callback function.")
 
-    # Send a buffer on next transfer. reps==-1 is forever (until next write)
-    def write(self, buf, reps=1):
-        self._wbuf = buf[:]  # Copy in case caller modifies before it gets sent (queue?)
-        self._reps = reps
+    # Queue a buffer for transmission.
+    def write(self, buf):
+        if not self._io:
+            raise ValueError("Write error: no MISO specified.")
+        self._wq.append(buf[:])  # Copy in case caller modifies before it's sent
 
     def _rinto(self, buf):  # .read_into() without callback
         buflen = len(buf)
@@ -154,16 +157,13 @@ class SpiSlave:
         if self._io:
             self._wdma.active(0)
             self._osm.active(0)
-            if self._reps:  # Repeat forever if _reps==-1
-                if self._reps > 0:
-                    self._reps -= 1
-                # TODO necessary? Can write buffer be bigger than read?
-                n = min(buflen, len(self._wbuf))
-                print("sending", n, self._wbuf[:n])
-                # print(self._dma, self._wdma)
-                self._wdma.config(
-                    read=self._wbuf, write=self._osm, count=n, ctrl=self._wcfg, trigger=True
-                )
+            if len(self._wq):  # Queue is not empty
+                wb = self._wq.pop(0)  # Assign oldest message to write buffer
+                # Write buffer can be bigger than read buf. SPI interface causes write data
+                # to be truncated to length of data sent by master.
+                n = len(wb)
+                print("sending", n, wb[:n])
+                self._wdma.config(read=wb, write=self._osm, count=n, ctrl=self._wcfg, trigger=True)
                 self._wdma.active(1)
                 self._osm.restart()  # osm waits for CS/ low
                 self._osm.active(1)
@@ -174,23 +174,24 @@ class SpiSlave:
         self._sm.put(buflen, 3)  # Number of expected bits
 
     # Hard ISR for CS/ rising edge.
+    # This is dependent on the integrity of the logic signals. Poor wiring can cause
+    # spurious IRQ's and erratic SM behaviour leading to invalid data, memfails, etc.
     def _done(self, _):  # Get no. of bytes received.
         self._dma.active(0)
         if self._io:
             self._wdma.active(0)
         self._sm.put(0)  # Request no. of received bits
         if not self._sm.rx_fifo():  # Occurs if ._rinto() never called while CSN is low:
-            # a transmission was missed.
+            # master has sent data that was never read. A transmission was missed.
             print("Missed TX?")
             return  # ISR runs on trailing edge but SM is not running. Nothing to do.
-        # TODO Next line occasionally memfails if IRQ is hard
+        # See above comment re memfails on next line
         sp = self._sm.get() >> 3  # Bits->bytes: space left in buffer or 7ffffff on overflow
         self._nbytes = self._buflen - sp if sp != 0x7FFFFFF else self._buflen
         self._dma.active(0)
         self._sm.active(0)
         self._tsf.set()
         self._read_done = True
-        print("GH3")
         if self._docb:  # Only run CB if user has called .read_into()
             self._docb = False
             schedule(self._callback, self._nbytes)  # Soft ISR

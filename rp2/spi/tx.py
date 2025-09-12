@@ -3,6 +3,9 @@
 # Released under the MIT License (MIT). See LICENSE.
 # Copyright (c) 2025 Peter Hinch
 
+# SPI slave receives data at up to 30MHz
+# but return direction only works at 10MHz.
+
 from machine import Pin, SPI
 from time import sleep_ms
 
@@ -16,12 +19,14 @@ spi = SPI(0, baudrate=1_000_000, sck=pin_sck, mosi=pin_mosi, miso=pin_miso)
 
 
 def send(obuf):
+    obuf = bytearray(obuf)
     cs(0)
-    spi.write(obuf)
+    spi.write_readinto(obuf, obuf)
+    print("got", bytes(obuf))
     cs(1)
     sleep_ms(1000)
 
 
 while True:
-    send("The quick brown fox")
-    send("jumps over the lazy dog.")
+    send(b"The quick brown fox       ")
+    send(b"jumps over the lazy dog. ")
