@@ -81,10 +81,19 @@ acquired (MISO):
 * `ibuf` A `bytearray` for MISO data. If the quantity of data exceeds the length
 of the buffer it will be truncated.
 
+Using MISO affects the maximum achievable baudrate. This is because the incoming
+signal is delayed by two system clock periods by the input synchronisers (RP2040
+manual 3.5.6.3), plus up to one additional system clock period because the slave
+and master are mutually asynchronous. The latency becomes even worse when using
+the asynchronous slave because the slave's `sck` is further delayed relative to
+the master's by the slave's input synchronisers. In testing even 10MHz was too
+high a rate for reliable reception.
+
 ## 1.3 Methods
 
 * `write(data : bytes)` arg a `bytes` or `bytearray` of data to transmit. Return
-is rapid with transmission running in the background. Returns `None`.
+is rapid, returns `None`. The data is queued for transmission. The oldest object
+is transmitted when the master next initiates a transfer.
 * `deinit()` Disables the DMA and the SM. Returns `None`.
 
 ## 1.4 CS/
@@ -97,12 +106,14 @@ between power-up and application start-up. A value of a few KΩ is suggested.
 ## 1.5 Callback
 
 This runs when the DMA is complete. It takes no args and runs in a hard IRQ
-context. Typical use is to set a `ThreadSafeFlag`, allowing a pending task to
-resume. Typically this will deassert `CS/` and initiate processing of received
-data. Note that the DMA completes before transmission ends due to bytes stored
-in the SM FIFO. This is unlikely to have practical consequences because of
-MicroPython latency: the master executes several MP instructions before the
-callback runs, and the response to a `ThreadSafeFlag` typically takes >200μs.
+context. It should deassert `CS/`. Typical use is to set a `ThreadSafeFlag`,
+allowing a pending task to resume, to initiate processing of received data.
+
+Users of low baudrates (<1MHz) should note that the DMA completes before
+transmission ends due to three bytes stored in the SM FIFO. This is unlikely to
+have practical consequences because of MicroPython latency: where the callback
+deasserts `CS/` the time between the last edge of `clk` and the trailing edge
+of `CS/` was 93μs (RP2040 @125MHz).
 
 # 2. Nonblocking SPI slave
 
@@ -251,6 +262,11 @@ REPL.
 The slave will ignore all interface activity until CS/ is driven low. It then
 receives data with the end of message identified by a low to high transition on
 CS/.
+
+The input pins are very sensitive to electrical noise: wiring to the master must
+be kept very short. This is because of the very high speed of the RP2 internal
+logic (clock rates >=125MHz). Pulses of a few ns duration can cause the state
+machine to respond, or can cause an IRQ to be raised.
 
 # 3. Pulse Measurement
 

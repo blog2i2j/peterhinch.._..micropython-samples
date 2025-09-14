@@ -16,7 +16,7 @@ alloc_emergency_exception_buf(100)
 # 2 CS\
 
 
-@rp2.asm_pio(autopull=True)
+@rp2.asm_pio(autopush=True, autopull=True)
 def spi_in():
     label("escape")  # Just started, transfer ended or overrun attempt.
     out(y, 32)  # Get maximum byte count (blocking wait)
@@ -37,14 +37,13 @@ def spi_in():
     jmp("overrun")
     label("continue")
     jmp(x_dec, "bit")  # Post decrement
-    push()
+    # push()
     wrap()  # Next byte
     label("done")  # ISR has sent data
     out(x, 32)  # Discard it
     in_(y, 30)  # Return amount of unfilled buffer truncated to 30 bits
-    push()
-    # TODO Is this valid given that push_thresh==8?
     # Truncation ensures that overrun returns a short int
+    # push()
     jmp("escape")
 
 
@@ -95,7 +94,7 @@ class SpiSlave:
             sm_num,
             spi_in,
             in_shiftdir=rp2.PIO.SHIFT_LEFT,
-            # push_thresh=8,
+            push_thresh=8,
             in_base=mosi,
             jmp_pin=sck,
         )
@@ -187,7 +186,7 @@ class SpiSlave:
             return  # ISR runs on trailing edge but SM is not running. Nothing to do.
         # See above comment re memfails on next line
         sp = self._sm.get() >> 3  # Bits->bytes: space left in buffer or 7ffffff on overflow
-        self._nbytes = self._buflen - sp if sp != 0x7FFFFFF else self._buflen
+        self._nbytes = self._buflen - sp if sp != 0x07FF_FFFF else self._buflen
         self._dma.active(0)
         self._sm.active(0)
         self._tsf.set()
